@@ -1,4 +1,3 @@
-
 package cl.duoc.evaluacion2.viewmodel
 
 import android.content.Context
@@ -7,8 +6,16 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
+import cl.duoc.evaluacion2.remote.ApiClient
+import cl.duoc.evaluacion2.remote.CambioEstadoRequest
+import cl.duoc.evaluacion2.remote.ContenidoDto
+import cl.duoc.evaluacion2.remote.ContenidoRequest
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
+import retrofit2.HttpException
+import java.io.IOException
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 
@@ -53,11 +60,56 @@ class UTPViewModel(context: Context) : ViewModel() {
             Context.MODE_PRIVATE
         )
 
-    var contenidos by mutableStateOf(leerContenidos())
+    var contenidos by mutableStateOf<List<ContenidoUTP>>(emptyList())
         private set
 
     var bitacora by mutableStateOf(leerBitacora())
         private set
+
+    var errorRed by mutableStateOf("")
+        private set
+
+    // ---------- Lectura desde el backend ----------
+
+    fun cargar() {
+        viewModelScope.launch {
+            try {
+                recargar()
+            } catch (e: Exception) {
+                errorRed = mensajeError(e)
+            }
+        }
+    }
+
+    private suspend fun recargar() {
+        contenidos = ApiClient.api.contenidos().map { it.aContenidoUTP() }
+        errorRed = ""
+    }
+
+    private fun ContenidoDto.aContenidoUTP() = ContenidoUTP(
+        id = id,
+        datos = DatosContenidoUTP(
+            asignaturaId = asignaturaId,
+            unidad = unidad,
+            codigoOA = codigoOA ?: "",
+            descripcionOA = descripcionOA,
+            explicacion = explicacion,
+            tituloActividad = tituloActividad,
+            pregunta = pregunta
+        ),
+        estado = EstadoUTP.values().firstOrNull { it.name == estado }
+            ?: EstadoUTP.BORRADOR,
+        observacion = observacion ?: "",
+        actualizado = actualizado ?: ""
+    )
+
+    private fun mensajeError(e: Exception): String = when (e) {
+        is HttpException -> "Error del servidor (${e.code()})"
+        is IOException -> "Sin conexión con el servidor"
+        else -> "No se pudo completar la operación"
+    }
+
+    // ---------- Bitácora (local por ahora) ----------
 
     private fun fechaActual(): String {
         return LocalDateTime.now().format(
@@ -65,52 +117,10 @@ class UTPViewModel(context: Context) : ViewModel() {
         )
     }
 
-    private fun leerContenidos(): List<ContenidoUTP> {
-        return try {
-            val array = JSONArray(
-                preferencias.getString(
-                    "contenidos",
-                    "[]"
-                ) ?: "[]"
-            )
-
-            (0 until array.length()).mapNotNull { i ->
-                val json = array.optJSONObject(i)
-                    ?: return@mapNotNull null
-
-                val estado = EstadoUTP.values()
-                    .firstOrNull {
-                        it.name == json.optString("estado")
-                    } ?: EstadoUTP.BORRADOR
-
-                ContenidoUTP(
-                    id = json.optLong("id"),
-                    datos = DatosContenidoUTP(
-                        asignaturaId = json.optString("asignaturaId"),
-                        unidad = json.optString("unidad"),
-                        codigoOA = json.optString("codigoOA"),
-                        descripcionOA = json.optString("descripcionOA"),
-                        explicacion = json.optString("explicacion"),
-                        tituloActividad = json.optString("tituloActividad"),
-                        pregunta = json.optString("pregunta")
-                    ),
-                    estado = estado,
-                    observacion = json.optString("observacion"),
-                    actualizado = json.optString("actualizado")
-                )
-            }
-        } catch (e: Exception) {
-            emptyList()
-        }
-    }
-
     private fun leerBitacora(): List<RegistroUTP> {
         return try {
             val array = JSONArray(
-                preferencias.getString(
-                    "bitacora",
-                    "[]"
-                ) ?: "[]"
+                preferencias.getString("bitacora", "[]") ?: "[]"
             )
 
             (0 until array.length()).mapNotNull { i ->
@@ -128,37 +138,7 @@ class UTPViewModel(context: Context) : ViewModel() {
         }
     }
 
-    private fun guardarContenidos() {
-        val array = JSONArray()
-
-        contenidos.forEach { contenido ->
-            val datos = contenido.datos
-
-            array.put(
-                JSONObject()
-                    .put("id", contenido.id)
-                    .put("asignaturaId", datos.asignaturaId)
-                    .put("unidad", datos.unidad)
-                    .put("codigoOA", datos.codigoOA)
-                    .put("descripcionOA", datos.descripcionOA)
-                    .put("explicacion", datos.explicacion)
-                    .put("tituloActividad", datos.tituloActividad)
-                    .put("pregunta", datos.pregunta)
-                    .put("estado", contenido.estado.name)
-                    .put("observacion", contenido.observacion)
-                    .put("actualizado", contenido.actualizado)
-            )
-        }
-
-        preferencias.edit()
-            .putString("contenidos", array.toString())
-            .apply()
-    }
-
-    private fun registrar(
-        id: Long,
-        accion: String
-    ) {
+    private fun registrar(id: Long, accion: String) {
         bitacora = listOf(
             RegistroUTP(id, accion, fechaActual())
         ) + bitacora
@@ -177,6 +157,23 @@ class UTPViewModel(context: Context) : ViewModel() {
         preferencias.edit()
             .putString("bitacora", array.toString())
             .apply()
+    }
+
+    // ---------- Escritura hacia el backend ----------
+
+    private fun ejecutar(
+        textoBitacora: String,
+        operacion: suspend () -> Long
+    ) {
+        viewModelScope.launch {
+            try {
+                val id = operacion()
+                registrar(id, textoBitacora)
+                recargar()
+            } catch (e: Exception) {
+                errorRed = mensajeError(e)
+            }
+        }
     }
 
     fun guardarContenido(
@@ -210,19 +207,21 @@ class UTPViewModel(context: Context) : ViewModel() {
             return false
         }
 
+        val peticion = ContenidoRequest(
+            asignaturaId = limpio.asignaturaId,
+            unidad = limpio.unidad,
+            codigoOA = limpio.codigoOA,
+            descripcionOA = limpio.descripcionOA,
+            explicacion = limpio.explicacion,
+            tituloActividad = limpio.tituloActividad,
+            pregunta = limpio.pregunta
+        )
+
         if (idEditar == null) {
 
-            val nuevoId =
-                (contenidos.maxOfOrNull { it.id } ?: 0L) + 1L
-
-            contenidos = contenidos + ContenidoUTP(
-                id = nuevoId,
-                datos = limpio,
-                actualizado = fechaActual()
-            )
-
-            guardarContenidos()
-            registrar(nuevoId, "Contenido creado como borrador")
+            ejecutar("Contenido creado como borrador") {
+                ApiClient.api.crearContenido(peticion).id
+            }
 
         } else {
 
@@ -236,21 +235,9 @@ class UTPViewModel(context: Context) : ViewModel() {
                 return false
             }
 
-            contenidos = contenidos.map {
-                if (it.id == idEditar) {
-                    it.copy(
-                        datos = limpio,
-                        estado = EstadoUTP.BORRADOR,
-                        observacion = "",
-                        actualizado = fechaActual()
-                    )
-                } else {
-                    it
-                }
+            ejecutar("Borrador modificado") {
+                ApiClient.api.editarContenido(idEditar, peticion).id
             }
-
-            guardarContenidos()
-            registrar(idEditar, "Borrador modificado")
         }
 
         return true
@@ -260,6 +247,7 @@ class UTPViewModel(context: Context) : ViewModel() {
         id: Long,
         estadosPermitidos: Set<EstadoUTP>,
         nuevoEstado: EstadoUTP,
+        accionApi: String,
         observacion: String = ""
     ): Boolean {
 
@@ -277,20 +265,12 @@ class UTPViewModel(context: Context) : ViewModel() {
             return false
         }
 
-        contenidos = contenidos.map {
-            if (it.id == id) {
-                it.copy(
-                    estado = nuevoEstado,
-                    observacion = observacion.trim(),
-                    actualizado = fechaActual()
-                )
-            } else {
-                it
-            }
+        ejecutar("Estado cambiado a: ${nuevoEstado.etiqueta}") {
+            ApiClient.api.cambiarEstado(
+                id,
+                CambioEstadoRequest(accionApi, observacion.trim())
+            ).id
         }
-
-        guardarContenidos()
-        registrar(id, "Estado cambiado a: ${nuevoEstado.etiqueta}")
 
         return true
     }
@@ -299,7 +279,8 @@ class UTPViewModel(context: Context) : ViewModel() {
         return cambiarEstado(
             id,
             setOf(EstadoUTP.BORRADOR),
-            EstadoUTP.EN_REVISION
+            EstadoUTP.EN_REVISION,
+            "enviar-revision"
         )
     }
 
@@ -307,7 +288,8 @@ class UTPViewModel(context: Context) : ViewModel() {
         return cambiarEstado(
             id,
             setOf(EstadoUTP.EN_REVISION),
-            EstadoUTP.AUTORIZADO
+            EstadoUTP.AUTORIZADO,
+            "aprobar"
         )
     }
 
@@ -319,6 +301,7 @@ class UTPViewModel(context: Context) : ViewModel() {
             id,
             setOf(EstadoUTP.EN_REVISION),
             EstadoUTP.RECHAZADO,
+            "rechazar",
             observacion
         )
     }
@@ -327,7 +310,8 @@ class UTPViewModel(context: Context) : ViewModel() {
         return cambiarEstado(
             id,
             setOf(EstadoUTP.AUTORIZADO),
-            EstadoUTP.PUBLICADO
+            EstadoUTP.PUBLICADO,
+            "publicar"
         )
     }
 
@@ -335,7 +319,8 @@ class UTPViewModel(context: Context) : ViewModel() {
         return cambiarEstado(
             id,
             setOf(EstadoUTP.PUBLICADO),
-            EstadoUTP.DESHABILITADO
+            EstadoUTP.DESHABILITADO,
+            "deshabilitar"
         )
     }
 }

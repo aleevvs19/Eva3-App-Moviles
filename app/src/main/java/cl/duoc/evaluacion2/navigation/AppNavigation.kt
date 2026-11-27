@@ -4,6 +4,8 @@ import android.widget.Toast
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -12,10 +14,12 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 
 import cl.duoc.evaluacion2.PantallaInicio
 import cl.duoc.evaluacion2.local.AppDatabase
+import cl.duoc.evaluacion2.session.Sesion
 
 import cl.duoc.evaluacion2.screens.LoginScreen
 import cl.duoc.evaluacion2.screens.RegistroScreen
@@ -79,6 +83,24 @@ fun AppNavigation() {
             )
         }
     )
+
+    // GUARDIA DE NAVEGACION SEGURA
+    val entradaActual by navController.currentBackStackEntryAsState()
+    val rutaActual = entradaActual?.destination?.route
+
+    LaunchedEffect(rutaActual) {
+        if (rutaActual == null) return@LaunchedEffect
+
+        if (Sesion.esRutaPublica(rutaActual)) {
+            // Al volver a una pantalla pública se cierra la sesión
+            Sesion.cerrar()
+        } else if (!Sesion.puedeEntrar(rutaActual)) {
+            navController.navigate("inicio") {
+                popUpTo(navController.graph.id) { inclusive = true }
+                launchSingleTop = true
+            }
+        }
+    }
 
     NavHost(
         navController = navController,
@@ -430,6 +452,9 @@ fun AppNavigation() {
 
         // PANEL JEFATURA UTP
         composable("utp") {
+
+            // Carga los contenidos desde el backend al entrar al panel
+            LaunchedEffect(Unit) { utpViewModel.cargar() }
 
             UTPScreen(
                 viewModel = utpViewModel,

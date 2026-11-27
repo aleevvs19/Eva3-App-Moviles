@@ -1,4 +1,3 @@
-
 package cl.duoc.evaluacion2.viewmodel
 
 import android.util.Base64
@@ -10,10 +9,14 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import cl.duoc.evaluacion2.local.Usuario
 import cl.duoc.evaluacion2.local.UsuarioDao
+import cl.duoc.evaluacion2.remote.ApiClient
+import cl.duoc.evaluacion2.remote.LoginRequest
+import cl.duoc.evaluacion2.session.Sesion
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.security.MessageDigest
+import retrofit2.HttpException
+import java.io.IOException
 import java.security.SecureRandom
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.PBEKeySpec
@@ -107,55 +110,32 @@ class LoginViewModel(
         perfil: String,
         onExito: () -> Unit
     ) {
-        if (!preparado || cargando) return
+        if (cargando) return
 
         viewModelScope.launch {
             cargando = true
             error = ""
 
             try {
-                val usuario = usuarioDao.buscarPorCorreo(
-                    correo.trim().lowercase()
+                val respuesta = ApiClient.api.login(
+                    LoginRequest(
+                        correo = correo.trim().lowercase(),
+                        password = contrasena,
+                        perfil = perfil
+                    )
                 )
+                ApiClient.token = respuesta.token
+                Sesion.iniciar(respuesta.perfil, respuesta.nombre)
+                onExito()
 
-                val valido = if (
-                    usuario != null &&
-                    usuario.perfil == perfil
-                ) {
-
-                    withContext(Dispatchers.Default) {
-
-                        val salt = Base64.decode(
-                            usuario.salt,
-                            Base64.NO_WRAP
-                        )
-
-                        val hashGuardado = Base64.decode(
-                            usuario.passwordHash,
-                            Base64.NO_WRAP
-                        )
-
-                        val hashIngresado = calcularHash(
-                            contrasena,
-                            salt
-                        )
-
-                        MessageDigest.isEqual(
-                            hashGuardado,
-                            hashIngresado
-                        )
-                    }
-
+            } catch (e: HttpException) {
+                error = if (e.code() == 401) {
+                    "Correo o contraseña incorrectos"
                 } else {
-                    false
+                    "Error del servidor (${e.code()})"
                 }
-
-                if (valido) {
-                    onExito()
-                } else {
-                    error = "Correo o contraseña incorrectos"
-                }
-
+            } catch (e: IOException) {
+                error = "No hay conexión con el servidor"
             } catch (e: Exception) {
                 error = "No se pudo validar el usuario"
             } finally {
